@@ -4,8 +4,8 @@
     ПКМ по функции - настройки + бинд
 
     Visuals: TargetESP (Marker / Souls), Arrows, NameTags, Trails, JumpCircles, HUD
-    Movement: Sprint (пустышка, внутри KeepSprint)
-    Combat: Criticals (пустышка)
+    Movement: Sprint (внутри KeepSprint)
+    Combat: Criticals, Attack Aura.
 ]]
 
 local Players          = game:GetService("Players")
@@ -17,6 +17,7 @@ local Lighting         = game:GetService("Lighting")
 local CoreGui          = game:GetService("CoreGui")
 local Workspace        = game:GetService("Workspace")
 local Debris           = game:GetService("Debris")
+local HttpService      = game:GetService("HttpService")
 
 local LocalPlayer = Players.LocalPlayer
 
@@ -103,7 +104,7 @@ end
 
 local Blur = Instance.new("BlurEffect")
 Blur.Name = "KurvexUI_Blur"
-Blur.Size = 0
+Blur.Size = 6
 Blur.Parent = Lighting
 
 ---------------------------------------------------------------------
@@ -250,6 +251,17 @@ end
 local BIND_SETTINGS  = {}
 local FeatureToggles = {}
 
+-- shared state для AttackAura ↔ TargetESP
+local AuraState = { Target = nil, LastClick = 0 }   -- ← добавить
+
+-- forward decl (нужно для загрузки конфигов до определения в блоке МЕНЮ)
+local SetFeatureState                               -- ← добавить
+
+-- shared state для AttackAura ↔ TargetESP
+local AuraState = { Target = nil, LastClick = 0 }   -- ← добавить
+
+-- forward decl (нужно для загрузки конфигов до определения в блоке МЕНЮ)
+local SetFeatureState                               -- ← добавить
 ---------------------------------------------------------------------
 -- ОБЩИЕ ХЕЛПЕРЫ ДЛЯ ИГРОКОВ
 ---------------------------------------------------------------------
@@ -332,6 +344,125 @@ DefineFeature("Criticals", {
 })
 
 ---------------------------------------------------------------------
+-- COMBAT: AttackAura
+---------------------------------------------------------------------
+do
+    local enabled = false
+    local VirtualUser = game:GetService("VirtualUser")
+
+    local cfg = DefineFeature("AttackAura", {
+        Settings = {
+            { Type = "toggle", Key = "SyncTargetESP", Label = "Sync with TargetESP", Default = true },
+            { Type = "toggle", Key = "Aim",           Label = "Aim / lock camera",   Default = true },
+            { Type = "cycle",  Key = "AimPart",       Label = "Aim at",
+              Options = { "Head", "Torso", "Root" }, Default = "Head" },
+            { Type = "slider", Key = "ClickInterval", Label = "Click interval",
+              Min = 0.01, Max = 2.10, Step = 0.01, Default = 0.10 },
+            { Type = "slider", Key = "Radius",        Label = "Radius",
+              Min = 1, Max = 20, Step = 1, Default = 6 },
+        },
+        OnToggle = function(on)
+            enabled = on
+            if not on then AuraState.Target = nil end
+        end,
+    })
+
+    local function FindAuraTarget(range)
+        local myRoot = GetRoot(LocalPlayer)
+        if not myRoot then return nil end
+        local best, bestDist = nil, range
+        for _, plr in ipairs(Players:GetPlayers()) do
+            if plr ~= LocalPlayer and plr.Character then
+                local r = GetRoot(plr)
+                if r and IsAlive(plr) then
+                    local d = (r.Position - myRoot.Position).Magnitude
+                    if d <= bestDist then
+                        best, bestDist = plr.Character, d
+                    end
+                end
+            end
+        end
+        return best
+    end
+
+    local function GetAimPart(char, mode)
+        if not char then return nil end
+        if mode == "Head" then
+            return char:FindFirstChild("Head") or GetRoot(char)
+        elseif mode == "Torso" then
+            return char:FindFirstChild("UpperTorso")
+                or char:FindFirstChild("Torso")
+                or GetRoot(char)
+        end
+        return GetRoot(char)
+    end
+
+    -- наводит камеру на точку (сохраняя позицию камеры)
+    local function AimCameraAt(part)
+        local cam = Workspace.CurrentCamera
+        if not cam or not part or not part.Parent then return false end
+        local camPos = cam.CFrame.Position
+        local dir = part.Position - camPos
+        if dir.Magnitude < 0.05 then return false end
+        cam.CFrame = CFrame.lookAt(camPos, part.Position)
+        return true
+    end
+
+    -- двигает курсор на экранную позицию таргета
+    local function MoveMouseTo(part)
+        local cam = Workspace.CurrentCamera
+        if not cam or not part then return end
+        local sp, onScreen = cam:WorldToViewportPoint(part.Position)
+        if not onScreen then return end
+        if type(mousemoveabs) == "function" then
+            pcall(mousemoveabs, sp.X, sp.Y)
+        elseif type(mousemoverel) == "function" then
+            local vp = cam.ViewportSize
+            pcall(mousemoverel, sp.X - vp.X / 2, sp.Y - vp.Y / 2)
+        end
+    end
+
+    local function FireClick()
+        if type(mouse1click) == "function" then
+            pcall(mouse1click)
+            return
+        end
+        pcall(function()
+            VirtualUser:CaptureController()
+            VirtualUser:ClickButton1(Vector2.new(0.5, 0.5))
+        end)
+    end
+
+    AddUpdater("AttackAura", function(dt)
+        if not enabled then AuraState.Target = nil; return end
+
+        local t = FindAuraTarget(cfg.Radius)
+        AuraState.Target = t
+        if not t then return end
+
+        local aimPart = GetAimPart(t, cfg.AimPart)
+
+        -- непрерывный лок камеры (пока цель в радиусе)
+        if cfg.Aim and aimPart then
+            AimCameraAt(aimPart)
+        end
+
+        local now = os.clock()
+        if now - AuraState.LastClick >= cfg.ClickInterval then
+            AuraState.LastClick = now
+
+            -- перед самым кликом гарантированно смотрим на таргет
+            if aimPart then
+                if not cfg.Aim then AimCameraAt(aimPart) end
+                MoveMouseTo(aimPart)
+            end
+
+            FireClick()
+        end
+    end)
+end
+
+---------------------------------------------------------------------
 -- MOVEMENT: Sprint (пустышка, внутри KeepSprint тоже ничего не делает)
 ---------------------------------------------------------------------
 DefineFeature("Sprint", {
@@ -362,13 +493,18 @@ do
     local MARKER_IMAGE = "rbxassetid://114677874909839"
     local SOULS_IMAGE  = "rbxassetid://86932347364577"
     local SOULS_GROUPS, SOULS_LEN = 3, 25
-    local SOULS_A = Color3.fromRGB(165, 120, 255)
-    local SOULS_B = Color3.fromRGB(90, 170, 255)
 
     local function SoulsColor(offset)
-        local t = os.clock() * 0.35 + offset / 360
-        local a = (math.sin(t * math.pi * 2) + 1) / 2
-        return SOULS_A:Lerp(SOULS_B, a)
+        local base = PresetColor(cfg.Color, offset / 360)
+        local t    = os.clock() * 2 + offset / 180
+        local a    = (math.sin(t) + 1) / 2
+        local darker  = Color3.new(base.R * 0.35, base.G * 0.35, base.B * 0.35)
+        local lighter = Color3.new(
+            math.clamp(base.R * 1.15, 0, 1),
+            math.clamp(base.G * 1.15, 0, 1),
+            math.clamp(base.B * 1.15, 0, 1)
+        )
+        return darker:Lerp(lighter, a)
     end
 
     local anchor = Instance.new("Part")
@@ -445,12 +581,26 @@ do
     AddUpdater("TargetESP", function(dt)
         if cfg.Mode ~= appliedMode then ApplyMode(cfg.Mode) end
 
-        pickTimer += dt
-        if pickTimer >= 0.1 then
-            pickTimer = 0
-            target = enabled and PickTarget(cfg.Range) or nil
+    local auraEnabled = FeatureToggles["AttackAura"] and FeatureToggles["AttackAura"].Enabled
+    local auraCfg     = Config["AttackAura"]
+    local sync        = auraCfg and auraCfg.SyncTargetESP
+
+        if sync then
+    -- Sync ON: рисуем только когда ESP+aura включены, и на таргете ауры
+        if enabled and auraEnabled then
+            target = AuraState.Target
+        else
+            target = nil
         end
-        if not enabled then target = nil end
+    else
+    -- Sync OFF: старое независимое поведение
+    pickTimer += dt
+    if pickTimer >= 0.1 then
+        pickTimer = 0
+        target = enabled and PickTarget(cfg.Range) or nil
+    end
+    if not enabled then target = nil end
+end
 
         local has = target ~= nil and target.Parent ~= nil
         if has then lastTarget = target end
@@ -524,17 +674,22 @@ end
 ---------------------------------------------------------------------
 -- VISUALS: Arrows
 ---------------------------------------------------------------------
+---------------------------------------------------------------------
+-- VISUALS: Arrows
+---------------------------------------------------------------------
 do
     local enabled = false
 
     local cfg = DefineFeature("Arrows", {
         Settings = {
-            { Type = "cycle",  Key = "Texture",   Label = "Texture",    Options = { "1", "2" },   Default = "1" },
-            { Type = "slider", Key = "Radius",    Label = "Radius",     Min = 40,  Max = 300,  Step = 1,  Default = 80 },
-            { Type = "slider", Key = "Size",      Label = "Size",       Min = 8,   Max = 64,   Step = 1,  Default = 24 },
-            { Type = "slider", Key = "MaxDist",   Label = "Max dist",   Min = 100, Max = 5000, Step = 50, Default = 2000 },
-            { Type = "slider", Key = "AnimSpeed", Label = "Anim speed", Min = 1,   Max = 8,    Step = 0.5, Default = 3 },
-            { Type = "cycle",  Key = "Color",     Label = "Color",      Options = COLOR_OPTIONS, Default = "White" },
+            { Type = "cycle",  Key = "Texture",    Label = "Texture",    Options = { "1", "2" }, Default = "1" },
+            { Type = "slider", Key = "Radius",     Label = "Radius",     Min = 40,  Max = 300,  Step = 1,    Default = 80 },
+            { Type = "slider", Key = "Size",       Label = "Size",       Min = 8,   Max = 64,   Step = 1,    Default = 24 },
+            { Type = "slider", Key = "MaxDist",    Label = "Max dist",   Min = 100, Max = 5000, Step = 50,   Default = 2000 },
+            { Type = "slider", Key = "AnimSpeed",  Label = "Anim speed", Min = 1,   Max = 8,    Step = 0.5,  Default = 3 },
+            { Type = "cycle",  Key = "Color",      Label = "Color",      Options = COLOR_OPTIONS, Default = "White" },
+            { Type = "toggle", Key = "ShowDist",   Label = "Show distance", Default = true },
+            { Type = "slider", Key = "DistSize",   Label = "Dist size",  Min = 8,   Max = 24,   Step = 1,    Default = 13 },
         },
         OnToggle = function(on) enabled = on end,
     })
@@ -547,7 +702,13 @@ do
         return ARROW_TEXTURES[tonumber(cfg.Texture) or 1] or ARROW_TEXTURES[1]
     end
 
-    local arrowList, arrowProg, arrowLastPos = {}, {}, {}
+    -- Montserrat Bold (fallback на GothamBold — визуально близок)
+    local DIST_FONT = Enum.Font.GothamBold
+    pcall(function()
+        DIST_FONT = Font.new("rbxasset://fonts/families/Montserrat.json", Enum.FontWeight.Bold)
+    end)
+
+    local arrowList, arrowProg, arrowLastPos, distLabels, arrowLastDist = {}, {}, {}, {}, {}
 
     local arrowGui = Instance.new("ScreenGui")
     arrowGui.Name = "KurvexUI_Arrows"
@@ -558,7 +719,9 @@ do
 
     local function RemoveArrow(plr)
         if arrowList[plr] then arrowList[plr]:Destroy() end
-        arrowList[plr], arrowProg[plr], arrowLastPos[plr] = nil, nil, nil
+        if distLabels[plr] then distLabels[plr]:Destroy() end
+        arrowList[plr], arrowProg[plr], arrowLastPos[plr], distLabels[plr], arrowLastDist[plr] =
+            nil, nil, nil, nil, nil
     end
 
     Track(Players.PlayerRemoving:Connect(RemoveArrow))
@@ -586,6 +749,7 @@ do
             end
         end
 
+        -- создание
         for plr in pairs(wantShow) do
             if not arrowList[plr] then
                 local arrow = Instance.new("ImageLabel")
@@ -604,6 +768,23 @@ do
                 arrow.Parent = arrowGui
                 arrowList[plr] = arrow
                 arrowProg[plr] = 0
+
+                local dl = Instance.new("TextLabel")
+                dl.Name = "DistLabel_" .. plr.Name
+                dl.AnchorPoint = Vector2.new(0.5, 0)
+                dl.BackgroundTransparency = 1
+                dl.BorderSizePixel = 0
+                dl.FontFace = DIST_FONT
+                dl.TextSize = cfg.DistSize
+                dl.Text = ""
+                dl.TextColor3 = Color3.new(1, 1, 1)
+                dl.TextStrokeTransparency = 0.3
+                dl.TextStrokeColor3 = Color3.new(0, 0, 0)
+                dl.TextTransparency = 1
+                dl.Visible = false
+                dl.Size = UDim2.fromOffset(80, cfg.DistSize + 4)
+                dl.Parent = arrowGui
+                distLabels[plr] = dl
             end
         end
 
@@ -619,22 +800,31 @@ do
             end
 
             local r = GetRoot(plr)
-            local localPos
+            local localPos, dist
             if r then
                 localPos = cam.CFrame:PointToObjectSpace(r.Position)
                 arrowLastPos[plr] = localPos
+                if myRoot then
+                    dist = (r.Position - myRoot.Position).Magnitude
+                    arrowLastDist[plr] = dist
+                end
             else
                 localPos = arrowLastPos[plr]
+                dist     = arrowLastDist[plr]
             end
 
             local tex = Tex()
             if arrow.Image ~= tex then arrow.Image = tex end
 
+            local dl = distLabels[plr]
+
             if cur <= 0.001 and not r then
                 arrow.Visible = false
+                if dl then dl.Visible = false end
                 table.insert(toRemove, plr)
             elseif not localPos then
                 arrow.Visible = false
+                if dl then dl.Visible = false end
                 if cur <= 0.001 then table.insert(toRemove, plr) end
             else
                 local eased = (targetV == 1) and easeOutCubic(cur) or cur
@@ -652,6 +842,20 @@ do
                 arrow.Rotation = angle
                 arrow.ImageTransparency = 1 - cur
                 arrow.Visible = cur > 0.001
+
+                -- дистанция под стрелкой
+                if dl then
+                    if cfg.ShowDist and dist and cur > 0.001 then
+                        dl.Text = string.format("%dm", math.floor(dist + 0.5))
+                        dl.TextSize = cfg.DistSize
+                        dl.Position = UDim2.fromOffset(cx + offX, cy + offY + curSize / 2 + 2)
+                        dl.TextColor3 = PresetColor(cfg.Color, 0)
+                        dl.TextTransparency = 1 - cur
+                        dl.Visible = true
+                    else
+                        dl.Visible = false
+                    end
+                end
 
                 local g = arrow:FindFirstChild("ShimmerGradient")
                 if g then
@@ -1382,6 +1586,350 @@ end)
 UpdateBindDisplay()
 
 ---------------------------------------------------------------------
+-- MISC: Configs
+---------------------------------------------------------------------
+local CONFIG_FOLDER = "KurvexUI_Configs"
+
+local ConfigManagerGUI, ConfigManagerPanel, ConfigNameBox, ConfigListFrame
+
+local function EnsureFolder()
+    if not makefolder or not isfolder then return end
+    if not isfolder(CONFIG_FOLDER) then pcall(makefolder, CONFIG_FOLDER) end
+end
+
+local function ListConfigs()
+    local out = {}
+    if not listfiles or not isfolder then return out end
+    if not isfolder(CONFIG_FOLDER) then return out end
+    local ok, files = pcall(listfiles, CONFIG_FOLDER)
+    if not ok or not files then return out end
+    for _, f in ipairs(files) do
+        local name = f:match("([^/\\]+)%.json$")
+        if name then table.insert(out, name) end
+    end
+    return out
+end
+
+local function SaveConfig(name)
+    if not writefile then return false end
+    EnsureFolder()
+    local data = {}
+    for fname, fcfg in pairs(Config) do
+        if fname ~= "Configs" and fname ~= "Unload" then
+            data[fname] = {}
+            for k, v in pairs(fcfg) do data[fname][k] = v end
+        end
+    end
+    data._toggles = {}
+    for fname, t in pairs(FeatureToggles) do
+        local def = FeatureDefs[fname]
+        if def and not def.Instant and fname ~= "Configs" then
+            data._toggles[fname] = t.Enabled
+        end
+    end
+    data._binds = {}
+    for k, v in pairs(BIND_SETTINGS) do data._binds[k] = v end
+
+    local ok, json = pcall(function() return HttpService:JSONEncode(data) end)
+    if not ok then return false end
+    local path = CONFIG_FOLDER .. "/" .. name .. ".json"
+    return pcall(writefile, path, json)
+end
+
+local function LoadConfig(name)
+    if not readfile or not isfile then return false end
+    local path = CONFIG_FOLDER .. "/" .. name .. ".json"
+    if not isfile(path) then return false end
+    local ok, content = pcall(readfile, path)
+    if not ok or not content then return false end
+    local dok, data = pcall(function() return HttpService:JSONDecode(content) end)
+    if not dok or type(data) ~= "table" then return false end
+
+    for fname, fcfg in pairs(data) do
+        if fname ~= "_toggles" and fname ~= "_binds" and Config[fname] then
+            for k, v in pairs(fcfg) do
+                if Config[fname][k] ~= nil then Config[fname][k] = v end
+            end
+        end
+    end
+
+    for fname, _ in pairs(data) do
+        local def = FeatureDefs[fname]
+        if def and def.OnSetting then pcall(def.OnSetting, nil, nil) end
+    end
+
+    if type(data._toggles) == "table" then
+        for fname, en in pairs(data._toggles) do
+            local def = FeatureDefs[fname]
+            local t   = FeatureToggles[fname]
+            if t and def and not def.Instant and t.Enabled ~= en then
+                SetFeatureState(fname, en, true)
+            end
+        end
+    end
+
+    if type(data._binds) == "table" then
+        for k in pairs(BIND_SETTINGS) do BIND_SETTINGS[k] = nil end
+        for k, v in pairs(data._binds) do
+            if type(k) == "string" and type(v) == "string" then
+                BIND_SETTINGS[k] = v
+            end
+        end
+        UpdateBindDisplay()
+    end
+
+    return true
+end
+
+local function DeleteConfig(name)
+    if not delfile or not isfile then return false end
+    local path = CONFIG_FOLDER .. "/" .. name .. ".json"
+    if not isfile(path) then return false end
+    return pcall(delfile, path)
+end
+
+local function BuildConfigManager()
+    ConfigManagerGUI = Instance.new("ScreenGui")
+    ConfigManagerGUI.Name = "KurvexUI_ConfigManager"
+    ConfigManagerGUI.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+    ConfigManagerGUI.ResetOnSpawn = false
+    ConfigManagerGUI.IgnoreGuiInset = true
+    ConfigManagerGUI.DisplayOrder = 998
+    MountGui(ConfigManagerGUI, true)
+
+    local panel = Instance.new("Frame")
+    panel.Size = UDim2.fromOffset(280, 400)
+    panel.Position = UDim2.new(0.5, 0, 0.5, 0)
+    panel.AnchorPoint = Vector2.new(0.5, 0.5)
+    panel.BackgroundColor3 = BACKGROUND_COLOR
+    panel.BackgroundTransparency = 0.1
+    panel.BorderSizePixel = 0
+    panel.Visible = false
+    panel.Parent = ConfigManagerGUI
+    Corner(panel, 8)
+    Stroke(panel, BORDER_COLOR, 1)
+    ConfigManagerPanel = panel
+
+    local title = Instance.new("Frame")
+    title.Size = UDim2.new(1, 0, 0, 32)
+    title.BackgroundColor3 = MAIN_COLOR
+    title.BorderSizePixel = 0
+    title.Parent = panel
+    Corner(title, 8)
+
+    local titleLbl = Instance.new("TextLabel")
+    titleLbl.Size = UDim2.new(1, -50, 1, 0)
+    titleLbl.Position = UDim2.fromOffset(10, 0)
+    titleLbl.BackgroundTransparency = 1
+    titleLbl.Text = "Configs"
+    titleLbl.TextColor3 = Color3.new(1, 1, 1)
+    titleLbl.Font = Enum.Font.GothamBlack
+    titleLbl.TextSize = 14
+    titleLbl.TextXAlignment = Enum.TextXAlignment.Left
+    titleLbl.Parent = title
+
+    local closeBtn = Instance.new("TextButton")
+    closeBtn.Size = UDim2.fromOffset(24, 24)
+    closeBtn.Position = UDim2.new(1, -28, 0, 4)
+    closeBtn.BackgroundColor3 = Color3.fromRGB(80, 40, 40)
+    closeBtn.BorderSizePixel = 0
+    closeBtn.Text = "×"
+    closeBtn.TextColor3 = Color3.fromRGB(240, 180, 180)
+    closeBtn.Font = CairoFont
+    closeBtn.TextSize = 16
+    closeBtn.AutoButtonColor = false
+    closeBtn.Parent = title
+    Corner(closeBtn, 4)
+    closeBtn.MouseButton1Click:Connect(function()
+        SetFeatureState("Configs", false, true)
+    end)
+
+    local nameLabel = Instance.new("TextLabel")
+    nameLabel.Size = UDim2.new(1, -16, 0, 14)
+    nameLabel.Position = UDim2.fromOffset(8, 42)
+    nameLabel.BackgroundTransparency = 1
+    nameLabel.Text = "Имя конфига"
+    nameLabel.TextColor3 = Color3.fromRGB(160, 160, 166)
+    nameLabel.Font = CairoFont
+    nameLabel.TextSize = 11
+    nameLabel.TextXAlignment = Enum.TextXAlignment.Left
+    nameLabel.Parent = panel
+
+    local nameBox = Instance.new("TextBox")
+    nameBox.Size = UDim2.new(1, -16, 0, 26)
+    nameBox.Position = UDim2.fromOffset(8, 58)
+    nameBox.BackgroundColor3 = ROW_COLOR
+    nameBox.BorderSizePixel = 0
+    nameBox.Text = ""
+    nameBox.PlaceholderText = "название..."
+    nameBox.TextColor3 = Color3.new(1, 1, 1)
+    nameBox.PlaceholderColor3 = Color3.fromRGB(120, 120, 128)
+    nameBox.Font = CairoFont
+    nameBox.TextSize = 12
+    nameBox.ClearTextOnFocus = false
+    nameBox.Parent = panel
+    Corner(nameBox, 4)
+    ConfigNameBox = nameBox
+
+    local btnW = (280 - 16 - 8) / 3
+    local function MakeBtn(text, x, color, textColor)
+        local b = Instance.new("TextButton")
+        b.Size = UDim2.fromOffset(btnW, 26)
+        b.Position = UDim2.fromOffset(x, 92)
+        b.BackgroundColor3 = color
+        b.BorderSizePixel = 0
+        b.Text = text
+        b.TextColor3 = textColor
+        b.Font = CairoFont
+        b.TextSize = 11
+        b.AutoButtonColor = false
+        b.Parent = panel
+        Corner(b, 4)
+        return b
+    end
+
+    local saveBtn   = MakeBtn("Сохранить", 8,
+        Color3.fromRGB(40, 80, 50), Color3.fromRGB(180, 240, 200))
+    local loadBtn   = MakeBtn("Загрузить", 8 + btnW + 4,
+        Color3.fromRGB(40, 60, 90), Color3.fromRGB(180, 200, 240))
+    local deleteBtn = MakeBtn("Удалить", 8 + btnW * 2 + 8,
+        Color3.fromRGB(80, 40, 40), Color3.fromRGB(240, 180, 180))
+
+    local listLabel = Instance.new("TextLabel")
+    listLabel.Size = UDim2.new(1, -16, 0, 14)
+    listLabel.Position = UDim2.fromOffset(8, 126)
+    listLabel.BackgroundTransparency = 1
+    listLabel.Text = "Сохранённые конфиги"
+    listLabel.TextColor3 = Color3.fromRGB(160, 160, 166)
+    listLabel.Font = CairoFont
+    listLabel.TextSize = 11
+    listLabel.TextXAlignment = Enum.TextXAlignment.Left
+    listLabel.Parent = panel
+
+    local listHolder = Instance.new("Frame")
+    listHolder.Size = UDim2.new(1, -16, 1, -150)
+    listHolder.Position = UDim2.fromOffset(8, 142)
+    listHolder.BackgroundColor3 = Color3.fromRGB(20, 20, 23)
+    listHolder.BackgroundTransparency = 0.3
+    listHolder.BorderSizePixel = 0
+    listHolder.ClipsDescendants = true
+    listHolder.Parent = panel
+    Corner(listHolder, 4)
+
+    local scroll = Instance.new("ScrollingFrame")
+    scroll.Size = UDim2.new(1, -8, 1, -8)
+    scroll.Position = UDim2.fromOffset(4, 4)
+    scroll.BackgroundTransparency = 1
+    scroll.BorderSizePixel = 0
+    scroll.ScrollBarThickness = 4
+    scroll.ScrollBarImageColor3 = ACCENT_COLOR
+    scroll.CanvasSize = UDim2.new(0, 0, 0, 0)
+    scroll.AutomaticCanvasSize = Enum.AutomaticSize.Y
+    scroll.Parent = listHolder
+
+    local listFrame = Instance.new("Frame")
+    listFrame.Size = UDim2.new(1, 0, 1, 0)
+    listFrame.BackgroundTransparency = 1
+    listFrame.Parent = scroll
+    ConfigListFrame = listFrame
+
+    local layout = Instance.new("UIListLayout")
+    layout.Padding = UDim.new(0, 2)
+    layout.SortOrder = Enum.SortOrder.LayoutOrder
+    layout.Parent = listFrame
+
+    saveBtn.MouseButton1Click:Connect(function()
+        local n = nameBox.Text
+        if n == "" then ShowNotification("Введи имя конфига", false); return end
+        if SaveConfig(n) then
+            ShowNotification("Конфиг сохранён: " .. n, true)
+        else
+            ShowNotification("Ошибка сохранения (нет writefile?)", false)
+        end
+    end)
+
+    loadBtn.MouseButton1Click:Connect(function()
+        local n = nameBox.Text
+        if n == "" then ShowNotification("Выбери конфиг", false); return end
+        if LoadConfig(n) then
+            ShowNotification("Загружен: " .. n, true)
+        else
+            ShowNotification("Ошибка загрузки", false)
+        end
+    end)
+
+    deleteBtn.MouseButton1Click:Connect(function()
+        local n = nameBox.Text
+        if n == "" then return end
+        if DeleteConfig(n) then
+            ShowNotification("Удалён: " .. n, false)
+        else
+            ShowNotification("Ошибка удаления", false)
+        end
+    end)
+
+    MakeDraggable(panel, title)
+end
+
+local function RefreshConfigList()
+    if not ConfigListFrame then return end
+    for _, c in ipairs(ConfigListFrame:GetChildren()) do
+        if c:IsA("TextButton") or c:IsA("TextLabel") then c:Destroy() end
+    end
+    local list = ListConfigs()
+    table.sort(list)
+    if #list == 0 then
+        local lbl = Instance.new("TextLabel")
+        lbl.Size = UDim2.new(1, 0, 0, 22)
+        lbl.BackgroundTransparency = 1
+        lbl.Text = "Нет сохранённых конфигов"
+        lbl.TextColor3 = Color3.fromRGB(120, 120, 128)
+        lbl.Font = CairoFont
+        lbl.TextSize = 11
+        lbl.LayoutOrder = 1
+        lbl.Parent = ConfigListFrame
+        return
+    end
+    for i, name in ipairs(list) do
+        local btn = Instance.new("TextButton")
+        btn.Size = UDim2.new(1, 0, 0, 22)
+        btn.BackgroundColor3 = ROW_COLOR
+        btn.BorderSizePixel = 0
+        btn.Text = name
+        btn.TextColor3 = Color3.fromRGB(230, 230, 235)
+        btn.Font = CairoFont
+        btn.TextSize = 11
+        btn.AutoButtonColor = false
+        btn.LayoutOrder = i
+        btn.Parent = ConfigListFrame
+        Corner(btn, 3)
+        btn.MouseButton1Click:Connect(function()
+            if ConfigNameBox then ConfigNameBox.Text = name end
+        end)
+        btn.MouseEnter:Connect(function()
+            TweenService:Create(btn, TweenInfo.new(0.1),
+                { BackgroundColor3 = Color3.fromRGB(55, 55, 62) }):Play()
+        end)
+        btn.MouseLeave:Connect(function()
+            TweenService:Create(btn, TweenInfo.new(0.1),
+                { BackgroundColor3 = ROW_COLOR }):Play()
+        end)
+    end
+end
+
+DefineFeature("Configs", {
+    OnToggle = function(on)
+        if on then
+            if not ConfigManagerGUI then BuildConfigManager() end
+            RefreshConfigList()
+            if ConfigManagerPanel then ConfigManagerPanel.Visible = true end
+        else
+            if ConfigManagerPanel then ConfigManagerPanel.Visible = false end
+        end
+    end,
+})
+
+---------------------------------------------------------------------
 -- MISC: Unload
 ---------------------------------------------------------------------
 DefineFeature("Unload", {
@@ -1781,13 +2329,13 @@ MainFrame.Parent = ScreenGui
 
 local Columns = {
     { Name = "Combat",   Position = UDim2.new(0, 15, 0, 10),
-      Features = { "Criticals" } },
+      Features = { "Criticals", "AttackAura" } },
     { Name = "Movement", Position = UDim2.new(0, 275, 0, 10),
       Features = { "Sprint" } },
     { Name = "Visuals",  Position = UDim2.new(0, 535, 0, 10),
       Features = { "TargetESP", "Arrows", "NameTags", "Trails", "JumpCircles", "HUD" } },
     { Name = "Misc",     Position = UDim2.new(0, 795, 0, 10),
-      Features = { "Unload" } },
+      Features = { "Configs", "Unload" } },
 }
 
 local ColumnWindows = {}
@@ -1843,7 +2391,7 @@ local function UpdateColumnLayout(columnName)
     fc.Size = UDim2.new(1, 0, 0, currentY)
 end
 
-local function SetFeatureState(featureName, enabled, silent)
+SetFeatureState = function(featureName, enabled, silent)
     local t = FeatureToggles[featureName]
     local def = FeatureDefs[featureName]
     if not t or not def then return end
