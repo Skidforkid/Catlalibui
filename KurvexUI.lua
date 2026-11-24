@@ -104,7 +104,7 @@ end
 
 local Blur = Instance.new("BlurEffect")
 Blur.Name = "KurvexUI_Blur"
-Blur.Size = 6
+Blur.Size = 0
 Blur.Parent = Lighting
 
 ---------------------------------------------------------------------
